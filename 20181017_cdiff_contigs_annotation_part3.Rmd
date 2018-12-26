@@ -1,0 +1,465 @@
+---
+title: "cdiff contigs checkm and paloc from metagenomics"
+author: "Chunyu Zhao"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    highlight: tango
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+geometry: "left=1cm,right=1cm,top=2cm,bottom=2cm"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dpi=100,
+  fig.align = "center",
+  fig.width = 6,
+  cache.lazy = FALSE,
+  dev=c("png", "pdf"),
+  warning=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(readr)
+library(reshape2)
+library(ggbeeswarm)
+library(scales)
+library(stringr)
+library(RColorBrewer)
+library(viridis)
+library(pander)
+library(magrittr)
+library(forcats)
+library(ggbeeswarm)
+library(ggsci)
+library(scales)
+
+library(gridExtra)
+library(grid)
+
+library(pheatmap)
+library(ggrepel)
+
+source("new_helper.R")
+```
+
+# checkM C. diff contigs
+
+```{r}
+yue <- read_delim("20180925_yue_final.txt", delim ="\t")
+samples.final <- unique(yue$SampleID.0731)
+
+yue %<>% select(SampleID:subject_id, study_group_new, nonhost:host)
+
+contigs.cdff <- read_delim("20181219_RDS_data/20181129_contigs_cdiff.txt", delim="\t")
+```
+
+```{r, fig.width=8.5, fig.height=7}
+readlength <- 126
+
+toadd <- contigs.cdff %>%
+  group_by(sample) %>%
+  summarise(totalcdiffReads = sum(perbaseSum)/readlength) %>%
+  ungroup()
+
+DF <- left_join(yue, toadd, by=c("SampleID.0731" = "sample")) %>%
+  mutate(isPresent = ifelse(is.na(totalcdiffReads), FALSE, TRUE)) %>%
+  mutate(totalcdiffReads  = ifelse(is.na(totalcdiffReads), 0, as.numeric(totalcdiffReads)))
+
+f1 <- DF %>%
+  select(SampleID, study_group_new, redcap_event_name, isPresent) %>%
+  unique() %>% 
+  group_by(redcap_event_name, study_group_new) %>%
+  mutate(nonzero_proportion = mean(isPresent)) %>%
+  ungroup() %>% 
+  select(study_group_new, redcap_event_name, nonzero_proportion) %>% 
+  unique() %>% 
+  ggplot(aes(x = study_group_new, y = nonzero_proportion, fill = study_group_new)) +
+  geom_bar(stat = "identity") +
+  facet_grid( ~ redcap_event_name) +
+  scale_fill_aaas() +
+  theme_bw() +
+  labs(x = "", y = "Non zero proportion") +
+  theme(axis.text.x=element_blank()) +
+  ggtitle(paste("Non zero proportion of samples")) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+f2 <- DF %>%
+  filter(totalcdiffReads > 0) %>%
+  ggplot(aes_string(x = "redcap_event_name", y = "totalcdiffReads", color = "study_group_new")) +
+  geom_boxplot(coef=10000) +
+  geom_quasirandom() +
+  scale_y_log10() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_aaas() +
+  theme_bw() +
+  ggtitle(paste("Non zero relative abundance")) +
+  labs(y = "Relative abundance", x= "") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+f3 <- DF %>%
+  filter(totalcdiffReads > 0) %>%
+  mutate(prop = totalcdiffReads / nonhost) %>%
+  ggplot(aes(x = redcap_event_name, y = prop, group = subject_id, color = study_group_new)) +
+  geom_point() +
+  geom_line(color = "gray") +
+  theme_bw() +
+  #theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) +
+  scale_color_aaas() +
+  geom_text_repel(aes(label=ifelse(prop >= 0.001, as.character(subject_id), ""))) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  #scale_y_log10() +
+  scale_y_continuous(labels=scales:::percent) +
+  labs(x = "", y = "relative abundance of cdiff contigs") +
+  facet_wrap(~study_group_new)
+  #ggsave("20181203_cdiff_contigs_readcounts.pdf", width=7, height=6, useDingbats=FALSE)
+
+set.seed(123)
+grid.arrange(f1, f2, f3, 
+             ncol=2, widths=c(1,1), heights=c(1,1.8),
+             layout_matrix = rbind(c(1,2), c(3,3)))
+  
+```
+
+# checkm on MAG (20180918)
+
+TODO: collect all the C diff contigs, and run checkM to choose candidate samples for transmission
+
+## task 1: "20180918_BinId.txt"
+
+We ran `checkm` for the quality of the assembled contigs. And let's look at all the 
+
+```{r}
+checkm.raw <- read_delim("sunbeam_output_20180731/20180918_cdiff_contigs/20180918_Chdb.tsv", delim="\t")
+
+checkm <- checkm.raw %>%
+  mutate(SampleID = sub("-contigs", "", `Bin Id`)) %>% 
+  filter(Completeness > 0) %>%
+  select(SampleID, everything()) %>%
+  filter(SampleID %in% unique(yue$SampleID.0731)) %>%
+  mutate()
+
+checkm %<>%
+  left_join(yue, by=c("SampleID" = "SampleID.0731")) %>% 
+  select(SampleID, subject_id, Completeness, `N50 (contigs)`, redcap_event_name, study_group_new, `Bin Id`)
+  
+checkm %>%
+  select(SampleID, Completeness, `N50 (contigs)`, study_group_new) %>%
+  arrange(study_group_new, Completeness) %>%
+  pander(caption = "samples with cdiff genomes (completeness>0)", split.table=Inf)
+
+checkm %>%
+  select(`Bin Id`) %>%
+  write.table("sunbeam_output_20180731/20180918_cdiff_contigs/20180918_BinId.txt", sep="\t", quote=F, col.names=F, row.names=F)
+```
+
+## task 2: blastn selected contigs to isolates
+
+- => 0_blastdb/isolates.fasta
+
+```{r blastdb prep, eval=FALSE}
+library(Kmisc)
+library(seqinr)
+library("Biostrings")
+
+fasta.dir <- "20180918_transmission/20180903_final_asm/"
+fasta.files <- list.files(fasta.dir, "*.fasta")
+output.dir <- "20180918_transmission/20180903_final_asm/20180918_isolates"
+
+for (filepath in fasta.files){
+  print(filepath)
+  genome <- sub(".fasta", "", filepath)
+  s <- readBStringSet(file.path(fasta.dir,filepath))
+  
+  seqs <- list()
+  for (i in 1:length(s)){
+    curr.seq <- as.character(s[i])
+    curr.name <- sub("(.*)\\|(.*)", "\\1", names(curr.seq))
+    curr.name <- paste(genome, curr.name, sep = "_")
+    curr.seq <- unname(curr.seq)
+    seqs[[curr.name]] <- curr.seq
+  }
+  
+  dir.create(file.path(output.dir), showWarnings = FALSE)
+  output_fasta <-file.path(output.dir, paste(genome,".fasta", sep=""))
+  write.fasta(seqs, names(seqs), output_fasta)
+}
+```
+
+```{r 4:03 pm}
+read_blastn <- function(filepath) {
+  
+  sample_id <- sub("*.blastn", "", basename(filepath))
+  
+  read_delim(filepath, delim="\t", col_names = F) %>%
+    set_colnames(c("qseqid", "sseqid", "pident", "qlen","slen","length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "e_value", "bit_score"))
+}
+
+blastn_dir <- "20180918_transmission/1_blastn/"
+suffix_pattern <- ".blastn"
+
+blastn <- data_frame(FileName = list.files(blastn_dir, pattern=suffix_pattern)) %>%
+  group_by(FileName) %>%
+  do(read_blastn(file.path(blastn_dir, .$FileName))) %>%
+  ungroup() %>%
+  mutate(SampleID = sub(suffix_pattern, "", FileName)) %>%
+  select(SampleID, everything()) %>%
+  select(-FileName) %>%
+  ## ofc only keep samples in the final list...
+  filter(SampleID %in% yue$SampleID.0731)
+
+## 20180920: i dont want too small contigs
+blastn %<>%
+  filter(qlen >= 2000)
+
+samples.potential <- blastn %>% 
+  group_by(SampleID, qseqid) %>%
+  summarise(n = n()) %>%
+  filter(n < 10) %>% 
+  unique() %>%
+  dplyr::rename(numBlastHits = n)
+
+blastn.potentail <- samples.potential %>%
+  left_join(blastn, by=c("SampleID"="SampleID", "qseqid"="qseqid")) 
+
+blastn.potentail %<>%
+  mutate(qcov = length / qlen) %>% 
+  filter(qcov >= 0.5)
+
+blastn.potentail %>%
+  left_join(yue, by=c("SampleID" = "SampleID.0731")) %>% 
+  select(SampleID, subject_id, study_group_new, redcap_event_name) %>%
+  unique() %>%
+  arrange(subject_id) %>%
+  mutate(subject_id = as.character(subject_id)) %>%
+  select(SampleID, subject_id, study_group_new, redcap_event_name) %>%
+  pander(caption = "subject ids with potential cdiff transmission", split.table=Inf)
+```
+
+- Subj 72: not long enough
+- Sub 77 and Subj 13: their own long reads assembly
+
+After the first scanning, I don't think we see transmission between the short-reads assembled contigs and the long-reads assembled 
+
+# PaLoc/Toxin Genes Annotation
+
+- **goal**: For samples with highly estimated C diff abundance, go to look for the toxin genes (both original and alternative ways).
+
+## paloc metadata
+
+- `tcdA`: 8133 bps; GC content: 27.1%
+- `tcdB`: 7101 bps; GC content: 27.4%
+
+```{r}
+paloc <- read_delim("sunbeam_output_20180731/paloc.names", delim = " ", col_names = F)
+paloc.cdt <- paloc %>% filter(grepl("cdt", X1))
+paloc.non.cdt <- paloc %>% filter(!grepl("cdt", X1))
+
+paloc.cdt %<>%
+  separate(X1, into=c("toxingene", "accession"), sep=":>") %>% 
+  mutate(toxingene = sub(".fasta","", toxingene))
+paloc.non.cdt %<>%
+  separate(X1, into=c("toxingene", "extra"), sep=":>") %>%
+  mutate(toxingene = sub(".fasta","", toxingene)) %>%
+  separate(extra, into=c("accession"),sep=" ", extra="drop")
+
+paloc <- rbind(paloc.cdt, paloc.non.cdt) %>%
+  select(accession, toxingene)
+
+paloc %>%
+  count(toxingene) %>%
+  pander(caption = "number of sequences we have for each toxin genes")
+```
+
+## reads levels
+
+we blasted the reads to the paloc region genes and binary toxin genes.
+
+```{r}
+read_blastn<- function(filepath) {
+  
+  sample_id <- sub("*_1.blastn", "", basename(filepath))
+  
+  blastn <- read_delim(filepath, delim="\t", col_names = F)
+  
+  if (nrow(blastn) == 0){
+    #print(paste("empty blastn search for", sample_id))
+    return(data.frame(sample = sample_id, qseqid=NA))
+  }
+  
+  blastn %<>%
+    set_colnames(c("qseqid", "sseqid", "pident", "qlen","slen","length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "e_value", "bit_score"))
+  
+  ## keep the good `bit_score`
+  blastn %<>%
+    group_by(qseqid) %>%
+    filter(bit_score == max(bit_score)) %>%
+    ungroup()
+  
+  data.frame(sample = sample_id, blastn)
+}
+
+
+sunbeam_output_dir <- "sunbeam_output_20180731"
+paloc_dir <- file.path(sunbeam_output_dir, "sbx_gene_clusters", "paloc_20181120")
+suffix_pattern <- "*_1.blastn"
+
+paloc.blastn <- data_frame(FileName = list.files(paloc_dir, pattern=suffix_pattern)) %>%
+  group_by(FileName) %>%
+  do(read_blastn(file.path(paloc_dir, .$FileName))) %>%
+  ungroup() %>%
+  mutate(SampleID = sub(suffix_pattern, "", FileName)) %>%
+  select(-FileName)
+
+paloc.blastn %<>%
+  left_join(paloc, by=c("sseqid"= "accession"))
+
+
+nnoshow <- paloc.blastn %>% filter(is.na(qseqid)) %>% count(sample) %>% nrow()
+ntotal <- paloc.blastn %>% count(sample) %>% nrow()
+
+paloc.blastn %<>% filter(! is.na(qseqid))
+
+paloc.blastn %>%
+  ggplot(aes(x = pident)) +
+  geom_histogram() + 
+  facet_wrap( ~toxingene, scales = "free")
+## i decided not to do any filtering
+```
+
+```{r, fig.width=7.5, fig.height=4}
+paloc.blastn.counts <- paloc.blastn %>%
+  group_by(SampleID, toxingene) %>%
+  count() %>%
+  ungroup() %>%
+  dplyr::rename(ReadCounts = n) %>%
+  filter(SampleID %in% yue$SampleID.0731) %>%
+  spread(toxingene, ReadCounts, fill=0) %>%
+  select(SampleID, tcdA, tcdB) %>%
+  filter(tcdA > 0 | tcdB > 0 )
+
+paloc.blastn.counts <- left_join(yue, paloc.blastn.counts, by=c("SampleID.0731" = "SampleID"))
+
+paloc.blastn.counts %<>% mutate(tcdA = ifelse(is.na(tcdA), 0, as.numeric(tcdA))) %>%
+  mutate(tcdB = ifelse(is.na(tcdB), 0, as.numeric(tcdB)))
+
+
+paloc.blastn.counts %>%
+  ggplot(aes(x = redcap_event_name, y = tcdA, group = subject_id, color = study_group_new)) +
+  geom_point() +
+  geom_line(color = "gray") +
+  theme_bw() +
+  #geom_hline(yintercept = 30, linetype="longdash") +
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) +
+  scale_color_aaas() +
+  facet_wrap(~study_group_new, scales = "free") + 
+  ggtitle("tcdA") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  #ggsave("20181203_tcdA.pdf", width=6, height=5, useDingbats=FALSE) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+paloc.blastn.counts %>%
+  ggplot(aes(x = redcap_event_name, y = tcdB, group = subject_id, color = study_group_new)) +
+  geom_point() +
+  geom_line(color = "gray") +
+  theme_bw() +
+  #geom_hline(yintercept = 30, linetype="longdash") +
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) +
+  scale_color_aaas() +
+  facet_wrap(~study_group_new, scales = "free") + 
+  ggtitle("tcdB") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  #ggsave("20181203_tcdB.pdf", width=6, height=5, useDingbats=FALSE) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+- Out of `r ntotal` samples considered here, `r nnoshow` samples don't have any read hits PaLoc regions.
+
+## contigs levels
+
+- the `scov` is way too low.... why is this??
+
+```{r}
+read_blastn <- function(filepath) {
+  
+  sample_id <- sub("*_contigs.blastn", "", basename(filepath))
+  
+  blastn <- read_delim(filepath, delim="\t", col_names = F)
+  
+  if (nrow(blastn) == 0){
+    #print(paste("empty blastn search for", sample_id))
+    return(data.frame(qseqid=NA))
+  }
+  
+  blastn %>%
+    set_colnames(c("qseqid", "sseqid", "pident", "qlen","slen","length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "e_value", "bit_score"))
+}
+
+blastn_dir <- "sunbeam_output_20180731/sbx_gene_clusters/paloc_contigs//"
+suffix_pattern <- "_contigs.blastn"
+
+blastn <- data_frame(FileName = list.files(blastn_dir, pattern=suffix_pattern)) %>%
+  group_by(FileName) %>%
+  do(read_blastn(file.path(blastn_dir, .$FileName))) %>%
+  ungroup() %>%
+  mutate(SampleID = sub(suffix_pattern, "", FileName)) %>%
+  select(SampleID, everything()) %>%
+  select(-FileName) %>%
+  ## ofc only keep samples in the final list...
+  filter(SampleID %in% yue$SampleID.0731)
+
+blastn %<>% filter(!is.na(qseqid))
+```
+
+```{r, fig.width=4, fig.height=3}
+blastn %<>%
+  left_join(paloc, by=c("sseqid" = "accession")) %>%
+  select(-sseqid) %>%
+  select(SampleID, qseqid, toxingene, everything())
+
+blastn %<>% 
+  dplyr::rename(alnLen = length) %>%
+  mutate(scov = alnLen / slen )
+
+## i roughly looked over the results and decided to move on with this:
+blastn %<>% filter(toxingene %in% c("tcdA", "tcdB"))
+
+## okay, we only allow one contigs aligned to one section of the toxin gene
+blastn %<>%
+  group_by(SampleID, qseqid, toxingene) %>%
+  arrange(desc(scov)) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+blastn %>%
+  ggplot(aes(x = scov)) +
+  geom_histogram()
+
+
+## Sine the coverage is too low, I decided to roughly look at the total covered length from blast. Also the blasted contigs are very short. 
+
+blastn %>%
+  group_by(SampleID, toxingene) %>%
+  summarise(totalLen = sum(alnLen)) %>%
+  filter(totalLen > 4000) %>%
+  ungroup() %>%
+  left_join(yue, by=c("SampleID" = "SampleID.0731")) %>%
+  select(SampleID, subject_id, toxingene, totalLen) %>%
+  dplyr::rename(toxingeneCoverage = totalLen) %>%
+  pander(caption = "samples with potential toxin genes A and B")
+```
+
+**observation**: there are only two samples that we saw the tcdA and tcdB genes from shotgun metagenomics.

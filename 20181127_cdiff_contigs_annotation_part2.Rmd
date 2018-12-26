@@ -1,0 +1,646 @@
+---
+title: "C. difficile contigs abundance estimation"
+author: "Chunyu Zhao"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    highlight: tango
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+geometry: "left=1cm,right=1cm,top=2cm,bottom=2cm"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dpi=100,
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 4,
+  cache.lazy = FALSE,
+  dev=c("png", "pdf"),
+  warning=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(readr)
+library(reshape2)
+library(ggbeeswarm)
+library(scales)
+library(stringr)
+library(RColorBrewer)
+library(viridis)
+library(pander)
+library(magrittr)
+library(forcats)
+library(ggbeeswarm)
+library(ggsci)
+library(scales)
+
+library(gridExtra)
+library(grid)
+
+library(pheatmap)
+
+source("new_helper.R")
+```
+
+# o_clostridiales
+
+We look at the species in the Clostridiales order by family.
+
+## read in contigs 
+
+```{r}
+yue <- read_delim("20180925_yue_final.txt", delim ="\t")
+samples.final <- unique(yue$SampleID.0731)
+
+min_contig_len <- 500
+```
+
+- minimal contig length threshold: `r min_contig_len`
+
+```{r}
+contigs.bacteria <- readRDS("20181219_RDS_data/blastn_20181219_taxa_common_merge.rds") %>%
+  mutate(sample = as.character(sample)) %>%
+  filter(sample %in% samples.final)
+
+## apply more filter
+blastn.filtered <- readRDS("20181219_RDS_data/20181129_blastn_filtered.rds")
+blastn.filtered %<>% select(sample, qseqid) %>% unique()
+blastn.filtered$PassFilter <- TRUE
+
+contigs.bacteria %<>% 
+  left_join(blastn.filtered, by=c("sample", "qseqid")) %>%
+  filter(! is.na(PassFilter))
+
+contigs.per.base <- readRDS("20181219_RDS_data/contigs.per.base.df_20181120.rds") %>%
+  mutate(sample = sub(".depth","", FileName)) %>%
+  select(-FileName) %>%
+  select(sample, everything()) %>%
+  filter(sample %in% samples.final)
+
+readlength <- 126
+
+contigs.bacteria %<>% filter(sample %in% samples.final)
+```
+
+
+
+```{r}
+clostridiales <- contigs.bacteria %>% filter(grepl("o__Clostridiales", order, perl=T, ignore.case=T))
+
+clostridiales %>%
+  count(family) %>%
+  arrange(desc(n)) %>%
+  head(n = 7)
+```
+
+
+## lachnospiraceae
+
+```{r}
+lachnospiraceae <- contigs.bacteria %>% filter(grepl("f__Lachnospiraceae", family, perl=T, ignore.case=T))
+
+lachnospiraceae %<>% left_join(contigs.per.base, by=c("sample","qseqid"))
+
+lachnospiraceae %<>% 
+  left_join(yue[,c("SampleID.0731", "nonhost")], by=c("sample" = "SampleID.0731")) %>%
+  mutate(nonhost = nonhost / 10^6)
+
+#lachnospiraceae %>% count(species) %>% arrange(desc(n)) %>% View()
+#lachnospiraceae %>% filter( is.na(perbaseSum))
+
+candidates <- lachnospiraceae %>% 
+  count(species) %>%
+  arrange(desc(n)) %>%
+  filter(n >= 5000) %>% 
+  .$species
+
+candidates <- candidates[!grepl("s__NA", candidates)]
+
+lachnospiraceae.list <- list()
+for (cand in candidates){
+  cand_new <- sub(" ","_", sub("s__", "", cand)) 
+  
+  df <-  lachnospiraceae %>% filter(species %in% cand)
+  
+  df %<>%
+    group_by(sample) %>%
+    summarise(totalReads = sum(perbaseSum)/readlength) %>% 
+    ungroup()
+  colnames(df) <- c("SampleID", cand_new)
+  lachnospiraceae.list[[cand]] <- df
+  
+  ##### plot
+  colnames(df) <- c("SampleID", "ReadCounts")
+  DF <- left_join(yue, df, by=c("SampleID.0731" = "SampleID")) %>%
+    mutate(isPresent = ifelse(is.na(ReadCounts), FALSE, TRUE)) %>%
+    mutate(ReadCounts = ifelse(is.na(ReadCounts), 0, as.numeric(ReadCounts)))
+  
+  f1 <- DF %>%
+    select(SampleID, study_group_new, redcap_event_name, isPresent) %>%
+    unique() %>% 
+    group_by(redcap_event_name, study_group_new) %>%
+    mutate(nonzero_proportion = mean(isPresent)) %>%
+    ungroup() %>% 
+    select(study_group_new, redcap_event_name, nonzero_proportion) %>% 
+    unique() %>% 
+    ggplot(aes(x = study_group_new, y = nonzero_proportion, fill = study_group_new)) +
+    geom_bar(stat = "identity") +
+    facet_grid( ~ redcap_event_name) +
+    scale_fill_aaas() +
+    theme_bw() +
+    labs(x = "", y = "Non zero proportion") +
+    theme(axis.text.x=element_blank()) +
+    ggtitle(paste("Non zero proportion of samples")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  f2 <- DF %>%
+    filter(ReadCounts > 0) %>%
+    ggplot(aes_string(x = "redcap_event_name", y = "ReadCounts", color = "study_group_new")) +
+    geom_boxplot(coef=10000) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_color_aaas() +
+    theme_bw() +
+    ggtitle(paste("Non zero relative abundance")) +
+    labs(y = "Relative abundance", x= "") +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  set.seed(123)
+  grid.arrange(f1, f2, ncol=2, widths=c(1,1), top=cand_new)
+  
+}
+
+
+#filename <- paste("20181129_","lachnospiraceae", ".rds", sep="")
+#saveRDS(lachnospiraceae.list, file=filename)
+```
+
+
+## ruminococcaceae
+
+```{r}
+ruminococcaceae <- contigs.bacteria %>% filter(grepl("f__Ruminococcaceae", family, perl=T, ignore.case=T))
+
+ruminococcaceae %<>% left_join(contigs.per.base, by=c("sample","qseqid"))
+
+ruminococcaceae %<>% 
+  left_join(yue[,c("SampleID.0731", "nonhost")], by=c("sample" = "SampleID.0731")) %>%
+  mutate(nonhost = nonhost / 10^6)
+
+#ruminococcaceae %>% count(species) %>% arrange(desc(n)) %>% View()
+
+candidates <- ruminococcaceae %>% 
+  count(species) %>%
+  arrange(desc(n)) %>%
+  filter(n >= 3000) %>%
+  .$species
+
+candidates <- candidates[!grepl("s__NA", candidates)]
+
+ruminococcaceae.list <- list()
+for (cand in candidates){
+  cand_new <- sub(" ","_", sub("s__", "", cand)) 
+  
+  df <-  ruminococcaceae %>% filter(species %in% cand) 
+  
+  df %<>%
+    group_by(sample) %>%
+    summarise(totalReads = sum(perbaseSum)/readlength) %>% 
+    ungroup()
+  colnames(df) <- c("SampleID", cand_new)
+  ruminococcaceae.list[[cand]] <- df
+  
+  ##### plot
+  colnames(df) <- c("SampleID", "ReadCounts")
+  DF <- left_join(yue, df, by=c("SampleID.0731" = "SampleID")) %>%
+    mutate(isPresent = ifelse(is.na(ReadCounts), FALSE, TRUE)) %>%
+    mutate(ReadCounts = ifelse(is.na(ReadCounts), 0, as.numeric(ReadCounts)))
+  
+  f1 <- DF %>%
+    select(SampleID, study_group_new, redcap_event_name, isPresent) %>%
+    unique() %>% 
+    group_by(redcap_event_name, study_group_new) %>%
+    mutate(nonzero_proportion = mean(isPresent)) %>%
+    ungroup() %>% 
+    select(study_group_new, redcap_event_name, nonzero_proportion) %>% 
+    unique() %>% 
+    ggplot(aes(x = study_group_new, y = nonzero_proportion, fill = study_group_new)) +
+    geom_bar(stat = "identity") +
+    facet_grid( ~ redcap_event_name) +
+    scale_fill_aaas() +
+    theme_bw() +
+    labs(x = "", y = "Non zero proportion") +
+    theme(axis.text.x=element_blank()) +
+    ggtitle(paste("Non zero proportion of samples")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  f2 <- DF %>%
+    filter(ReadCounts > 0) %>%
+    ggplot(aes_string(x = "redcap_event_name", y = "ReadCounts", color = "study_group_new")) +
+    geom_boxplot(coef=10000) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_color_aaas() +
+    theme_bw() +
+    ggtitle(paste("Non zero relative abundance")) +
+    labs(y = "Relative abundance", x= "") +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  set.seed(123)
+  grid.arrange(f1, f2, ncol=2, widths=c(1,1), top=cand_new)
+}
+
+#filename <- paste("20181129_","ruminococcaceae", ".rds", sep="")
+#saveRDS(ruminococcaceae.list, file=filename)
+```
+
+## clostridiaceae
+
+```{r}
+clostridiaceae <- contigs.bacteria %>% filter(grepl("f__Clostridiaceae", family, perl=T, ignore.case=T))
+
+clostridiaceae %<>%
+  left_join(contigs.per.base, by=c("sample","qseqid"))
+
+clostridiaceae %<>% 
+  left_join(yue[,c("SampleID.0731", "nonhost")], by=c("sample" = "SampleID.0731")) %>%
+  mutate(nonhost = nonhost / 10^6)
+
+#clostridiaceae %>% filter(is.na(perbaseSum))
+#clostridiaceae %>% count(species) %>% arrange(desc(n)) %>% View()
+
+candidates <- clostridiaceae %>% 
+  count(species) %>%
+  arrange(desc(n)) %>%
+  filter(n >= 3000) %>%
+  .$species
+
+candidates <- candidates[!grepl("s__NA", candidates)]
+
+clostridiaceae.list <- list()
+for (cand in candidates){
+  cand_new <- sub(" ","_", sub("s__", "", cand)) 
+  
+  df <-  clostridiaceae %>% filter(species %in% cand) 
+  
+  df %<>%
+    group_by(sample) %>%
+    summarise(totalReads = sum(perbaseSum)/readlength) %>% 
+    ungroup()
+  colnames(df) <- c("SampleID", cand_new)
+  
+  clostridiaceae.list[[cand]] <- df
+  
+  
+  ##### plot
+  colnames(df) <- c("SampleID", "ReadCounts")
+  DF <- left_join(yue, df, by=c("SampleID.0731" = "SampleID")) %>%
+    mutate(isPresent = ifelse(is.na(ReadCounts), FALSE, TRUE)) %>%
+    mutate(ReadCounts = ifelse(is.na(ReadCounts), 0, as.numeric(ReadCounts)))
+  
+  f1 <- DF %>%
+    select(SampleID, study_group_new, redcap_event_name, isPresent) %>%
+    unique() %>% 
+    group_by(redcap_event_name, study_group_new) %>%
+    mutate(nonzero_proportion = mean(isPresent)) %>%
+    ungroup() %>% 
+    select(study_group_new, redcap_event_name, nonzero_proportion) %>% 
+    unique() %>% 
+    ggplot(aes(x = study_group_new, y = nonzero_proportion, fill = study_group_new)) +
+    geom_bar(stat = "identity") +
+    facet_grid( ~ redcap_event_name) +
+    scale_fill_aaas() +
+    theme_bw() +
+    labs(x = "", y = "Non zero proportion") +
+    theme(axis.text.x=element_blank()) +
+    ggtitle(paste("Non zero proportion of samples")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  f2 <- DF %>%
+    filter(ReadCounts > 0) %>%
+    ggplot(aes_string(x = "redcap_event_name", y = "ReadCounts", color = "study_group_new")) +
+    geom_boxplot(coef=10000) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_color_aaas() +
+    theme_bw() +
+    ggtitle(paste("Non zero relative abundance")) +
+    labs(y = "Relative abundance", x= "") +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  set.seed(123)
+  grid.arrange(f1, f2, ncol=2, widths=c(1,1), top=cand_new)
+}
+
+#filename <- paste("20181129_","clostridiaceae", ".rds", sep="")
+#saveRDS(clostridiaceae.list, file=filename)
+```
+
+## eubacteriacea
+
+```{r}
+eubacteriacea <- contigs.bacteria %>% filter(grepl("f__Eubacteriacea", family, perl=T, ignore.case=T))
+
+eubacteriacea %<>%
+  left_join(contigs.per.base, by=c("sample","qseqid"))
+
+eubacteriacea %<>% 
+  left_join(yue[,c("SampleID.0731", "nonhost")], by=c("sample" = "SampleID.0731")) %>%
+  mutate(nonhost = nonhost / 10^6)
+
+#eubacteriacea %>% filter(is.na(perbaseSum))
+#eubacteriacea %>% count(species) %>% arrange(desc(n)) %>% View()
+
+candidates <- eubacteriacea %>% 
+  count(species) %>%
+  arrange(desc(n)) %>%
+  filter(n >= 3000) %>%
+  .$species
+
+candidates <- candidates[!grepl("s__NA", candidates)]
+
+eubacteriacea.list <- list()
+for (cand in candidates){
+  cand_new <- sub(" ","_", sub("s__", "", cand)) 
+  
+  df <-  eubacteriacea %>% filter(species %in% cand) 
+  
+  df %<>%
+    group_by(sample) %>%
+    summarise(totalReads = sum(perbaseSum)/readlength) %>% 
+    ungroup()
+  colnames(df) <- c("SampleID", cand_new)
+  
+  eubacteriacea.list[[cand]] <- df
+  
+  
+  ##### plot
+  colnames(df) <- c("SampleID", "ReadCounts")
+  DF <- left_join(yue, df, by=c("SampleID.0731" = "SampleID")) %>%
+    mutate(isPresent = ifelse(is.na(ReadCounts), FALSE, TRUE)) %>%
+    mutate(ReadCounts = ifelse(is.na(ReadCounts), 0, as.numeric(ReadCounts)))
+  
+  f1 <- DF %>%
+    select(SampleID, study_group_new, redcap_event_name, isPresent) %>%
+    unique() %>% 
+    group_by(redcap_event_name, study_group_new) %>%
+    mutate(nonzero_proportion = mean(isPresent)) %>%
+    ungroup() %>% 
+    select(study_group_new, redcap_event_name, nonzero_proportion) %>% 
+    unique() %>% 
+    ggplot(aes(x = study_group_new, y = nonzero_proportion, fill = study_group_new)) +
+    geom_bar(stat = "identity") +
+    facet_grid( ~ redcap_event_name) +
+    scale_fill_aaas() +
+    theme_bw() +
+    labs(x = "", y = "Non zero proportion") +
+    theme(axis.text.x=element_blank()) +
+    ggtitle(paste("Non zero proportion of samples")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  f2 <- DF %>%
+    filter(ReadCounts > 0) %>%
+    ggplot(aes_string(x = "redcap_event_name", y = "ReadCounts", color = "study_group_new")) +
+    geom_boxplot(coef=10000) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_color_aaas() +
+    theme_bw() +
+    ggtitle(paste("Non zero relative abundance")) +
+    labs(y = "Relative abundance", x= "") +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  set.seed(123)
+  grid.arrange(f1, f2, ncol=2, widths=c(1,1), top=cand_new)
+  
+}
+
+#filename <- paste("20181129_","eubacteriacea", ".rds", sep="")
+#saveRDS(eubacteriacea.list, file=filename)
+```
+
+
+## oscillospiraceae
+
+```{r}
+oscillospiraceae <- contigs.bacteria %>% filter(grepl("f__Oscillospiraceae", family, perl=T, ignore.case=T))
+
+oscillospiraceae %<>%
+  left_join(contigs.per.base, by=c("sample","qseqid"))
+
+oscillospiraceae %<>% 
+  left_join(yue[,c("SampleID.0731", "nonhost")], by=c("sample" = "SampleID.0731")) %>%
+  mutate(nonhost = nonhost / 10^6)
+
+#oscillospiraceae %>% filter(is.na(perbaseSum))
+#oscillospiraceae %>% count(species) %>% arrange(desc(n)) %>% View()
+
+candidates <- oscillospiraceae %>% 
+  count(species) %>%
+  arrange(desc(n)) %>%
+  filter(n >= 4000) %>%
+  .$species
+
+candidates <- candidates[!grepl("s__NA", candidates)]
+
+oscillospiraceae.list <- list()
+for (cand in candidates){
+  cand_new <- sub(" ","_", sub("s__", "", cand)) 
+  
+  df <-  oscillospiraceae %>% filter(species %in% cand) 
+  
+  df %<>%
+    group_by(sample) %>%
+    summarise(totalReads = sum(perbaseSum)/readlength) %>% 
+    ungroup()
+  colnames(df) <- c("SampleID", cand_new)
+  
+  oscillospiraceae.list[[cand]] <- df
+  
+  ##### plot
+  colnames(df) <- c("SampleID", "ReadCounts")
+  DF <- left_join(yue, df, by=c("SampleID.0731" = "SampleID")) %>%
+    mutate(isPresent = ifelse(is.na(ReadCounts), FALSE, TRUE)) %>%
+    mutate(ReadCounts = ifelse(is.na(ReadCounts), 0, as.numeric(ReadCounts)))
+  
+  f1 <- DF %>%
+    select(SampleID, study_group_new, redcap_event_name, isPresent) %>%
+    unique() %>% 
+    group_by(redcap_event_name, study_group_new) %>%
+    mutate(nonzero_proportion = mean(isPresent)) %>%
+    ungroup() %>% 
+    select(study_group_new, redcap_event_name, nonzero_proportion) %>% 
+    unique() %>% 
+    ggplot(aes(x = study_group_new, y = nonzero_proportion, fill = study_group_new)) +
+    geom_bar(stat = "identity") +
+    facet_grid( ~ redcap_event_name) +
+    scale_fill_aaas() +
+    theme_bw() +
+    labs(x = "", y = "Non zero proportion") +
+    theme(axis.text.x=element_blank()) +
+    ggtitle(paste("Non zero proportion of samples")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  f2 <- DF %>%
+    filter(ReadCounts > 0) %>%
+    ggplot(aes_string(x = "redcap_event_name", y = "ReadCounts", color = "study_group_new")) +
+    geom_boxplot(coef=10000) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_color_aaas() +
+    theme_bw() +
+    ggtitle(paste("Non zero relative abundance")) +
+    labs(y = "Relative abundance", x= "") +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  set.seed(123)
+  grid.arrange(f1, f2, ncol=2, widths=c(1,1), top=cand_new)
+  
+}
+
+#filename <- paste("20181129_","oscillospiraceae", ".rds", sep="")
+#saveRDS(oscillospiraceae.list, file=filename)
+```
+
+## peptostreptococcaceae
+
+```{r}
+peptostreptococcaceae  <- contigs.bacteria %>% filter(grepl("Peptostreptococcaceae", family, perl=T, ignore.case=T))
+
+peptostreptococcaceae %<>%
+  left_join(contigs.per.base, by=c("sample","qseqid"))
+
+peptostreptococcaceae %<>% 
+  left_join(yue[,c("SampleID.0731", "nonhost")], by=c("sample" = "SampleID.0731")) %>%
+  mutate(nonhost = nonhost / 10^6)
+
+#peptostreptococcaceae %>% count(species) %>% arrange(desc(n)) %>% View()
+
+candidates <- peptostreptococcaceae %>% 
+  count(species) %>%
+  arrange(desc(n)) %>%
+  filter(n >= 2000) %>%
+  .$species
+
+candidates <- candidates[!grepl("s__NA", candidates)]
+
+peptostreptococcaceae.list <- list()
+for (cand in candidates){
+  cand_new <- sub(" ","_", sub("s__", "", cand))
+  
+  df <-  peptostreptococcaceae %>% filter(species %in% cand) 
+  
+  df %<>%
+    group_by(sample) %>%
+    summarise(totalReads = sum(perbaseSum)/readlength) %>% 
+    ungroup()
+  colnames(df) <- c("SampleID", cand_new)
+  
+  peptostreptococcaceae.list[[cand]] <- df
+  
+  ##### plot
+  colnames(df) <- c("SampleID", "ReadCounts")
+  DF <- left_join(yue, df, by=c("SampleID.0731" = "SampleID")) %>%
+    mutate(isPresent = ifelse(is.na(ReadCounts), FALSE, TRUE)) %>%
+    mutate(ReadCounts = ifelse(is.na(ReadCounts), 0, as.numeric(ReadCounts)))
+  
+  f1 <- DF %>%
+    select(SampleID, study_group_new, redcap_event_name, isPresent) %>%
+    unique() %>% 
+    group_by(redcap_event_name, study_group_new) %>%
+    mutate(nonzero_proportion = mean(isPresent)) %>%
+    ungroup() %>% 
+    select(study_group_new, redcap_event_name, nonzero_proportion) %>% 
+    unique() %>% 
+    ggplot(aes(x = study_group_new, y = nonzero_proportion, fill = study_group_new)) +
+    geom_bar(stat = "identity") +
+    facet_grid( ~ redcap_event_name) +
+    scale_fill_aaas() +
+    theme_bw() +
+    labs(x = "", y = "Non zero proportion") +
+    theme(axis.text.x=element_blank()) +
+    ggtitle(paste("Non zero proportion of samples")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  f2 <- DF %>%
+    filter(ReadCounts > 0) %>%
+    ggplot(aes_string(x = "redcap_event_name", y = "ReadCounts", color = "study_group_new")) +
+    geom_boxplot(coef=10000) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_color_aaas() +
+    theme_bw() +
+    ggtitle(paste("Non zero relative abundance")) +
+    labs(y = "Relative abundance", x= "") +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  set.seed(123)
+  grid.arrange(f1, f2, ncol=2, widths=c(1,1), top=cand_new)
+}
+
+
+#filename <- paste("20181129_","peptostreptococcaceae", ".rds", sep="")
+#saveRDS(peptostreptococcaceae.list, file=filename)
+```
+
+# C. difficile contigs abundance estimation
+
+- 20181129_contigs_cdiff.txt
+
+```{r, eval=FALSE}
+name <- "Clostridium difficile|Clostridioides difficile"
+
+cdiff <- contigs.bacteria %>% 
+  filter(grepl("difficile", species, perl=T, ignore.case=T))
+
+cdiff %<>%
+  left_join(contigs.per.base, by=c("sample","qseqid"))
+
+cdiff %<>% 
+  left_join(contigs.coverage, by=c("sample", "qseqid" ="contig"))
+
+
+cdiff %<>% left_join(yue[,c("SampleID.0731", "nonhost")], by=c("sample" = "SampleID.0731"))
+
+readlength <- 126
+cdiff %<>%
+  mutate(nonhost = nonhost / 10^6) %>%
+  mutate(RPKM = perbaseMean / nonhost / readlength)
+
+cdiff %>%
+  write.table("20181129_contigs_cdiff.txt", sep="\t", row.names = F, quote = F)
+```
+
+## sent to Yue
+
+- 20181129_cdiff_reads_toyue.txt
+
+```{r, eval=FALSE}
+toadd <- cdiff %>%
+  group_by(sample) %>%
+  summarise(totalcdiffReads = sum(perbaseSum)/readlength, totalcdiffRPM = sum(RPKM)) %>% 
+  ungroup()
+
+DF <- left_join(yue, toadd, by=c("SampleID.0731" = "sample"))
+
+DF %>%
+  select(SampleID,totalcdiffReads, totalcdiffRPM) %>%
+  write.table("20181129_cdiff_reads_toyue.txt", sep="\t", row.names=F, quote=F)
+```
